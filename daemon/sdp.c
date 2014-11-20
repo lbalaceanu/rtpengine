@@ -58,7 +58,7 @@ struct sdp_media {
 	str media_type;
 	str port;
 	str transport;
-	/* ... format list */
+	str formats; /* space separated */
 
 	long int port_num;
 	int port_count;
@@ -143,6 +143,17 @@ struct attribute_setup {
 	} value;
 };
 
+struct attribute_rtpmap {
+	str payload_type_str;
+	str encoding_str;
+	str clock_rate_str;
+
+	unsigned int payload_type;
+	str encoding;
+	unsigned int clock_rate;
+	str encoding_parameters;
+};
+
 struct sdp_attribute {
 	str full_line,	/* including a= and \r\n */
 	    line_value,	/* without a= and without \r\n */
@@ -169,6 +180,7 @@ struct sdp_attribute {
 		ATTR_MID,
 		ATTR_FINGERPRINT,
 		ATTR_SETUP,
+		ATTR_RTPMAP,
 	} attr;
 
 	union {
@@ -179,6 +191,7 @@ struct sdp_attribute {
 		struct attribute_group group;
 		struct attribute_fingerprint fingerprint;
 		struct attribute_setup setup;
+		struct attribute_rtpmap rtpmap;
 	} u;
 };
 
@@ -309,6 +322,9 @@ INLINE int extract_token(char **sp, char *end, str *out) {
 		EXTRACT_NETWORK_ADDRESS_NP(field);		\
 		if (parse_address(&output->field)) output->field.parsed.s6_addr32[0] = 0xfe
 
+#define PARSE_DECL char *end, *start
+#define PARSE_INIT start = output->value.s; end = start + output->value.len
+
 static int parse_origin(char *start, char *end, struct sdp_origin *output) {
 	if (output->parsed)
 		return -1;
@@ -338,6 +354,7 @@ static int parse_media(char *start, char *end, struct sdp_media *output) {
 	EXTRACT_TOKEN(media_type);
 	EXTRACT_TOKEN(port);
 	EXTRACT_TOKEN(transport);
+	str_init_len(&output->formats, start, end - start);
 
 	output->port_num = strtol(output->port.s, &ep, 10);
 	if (ep == output->port.s)
@@ -379,14 +396,12 @@ static int parse_attribute_group(struct sdp_attribute *output) {
 }
 
 static int parse_attribute_ssrc(struct sdp_attribute *output) {
-	char *start, *end;
+	PARSE_DECL;
 	struct attribute_ssrc *s;
 
 	output->attr = ATTR_SSRC;
 
-	start = output->value.s;
-	end = start + output->value.len;
-
+	PARSE_INIT;
 	EXTRACT_TOKEN(u.ssrc.id_str);
 	EXTRACT_TOKEN(u.ssrc.attr_str);
 
@@ -407,7 +422,8 @@ static int parse_attribute_ssrc(struct sdp_attribute *output) {
 }
 
 static int parse_attribute_crypto(struct sdp_attribute *output) {
-	char *start, *end, *endp;
+	PARSE_DECL;
+	char *endp;
 	struct attribute_crypto *c;
 	int salt_key_len, enc_salt_key_len;
 	int b64_state = 0;
@@ -419,9 +435,7 @@ static int parse_attribute_crypto(struct sdp_attribute *output) {
 
 	output->attr = ATTR_CRYPTO;
 
-	start = output->value.s;
-	end = start + output->value.len;
-
+	PARSE_INIT;
 	EXTRACT_TOKEN(u.crypto.tag_str);
 	EXTRACT_TOKEN(u.crypto.crypto_suite_str);
 	EXTRACT_TOKEN(u.crypto.key_params_str);
@@ -548,12 +562,12 @@ static int parse_attribute_rtcp(struct sdp_attribute *output) {
 }
 
 static int parse_attribute_candidate(struct sdp_attribute *output) {
-	char *end, *start, *ep;
+	PARSE_DECL;
+	char *ep;
 
-	start = output->value.s;
-	end = start + output->value.len;
 	output->attr = ATTR_CANDIDATE;
 
+	PARSE_INIT;
 	EXTRACT_TOKEN(u.candidate.foundation);
 	EXTRACT_TOKEN(u.candidate.component_str);
 	EXTRACT_TOKEN(u.candidate.transport);
@@ -575,14 +589,13 @@ static int parse_attribute_candidate(struct sdp_attribute *output) {
 }
 
 static int parse_attribute_fingerprint(struct sdp_attribute *output) {
-	char *end, *start;
+	PARSE_DECL;
 	unsigned char *c;
 	int i;
 
-	start = output->value.s;
-	end = start + output->value.len;
 	output->attr = ATTR_FINGERPRINT;
 
+	PARSE_INIT;
 	EXTRACT_TOKEN(u.fingerprint.hash_func_str);
 	EXTRACT_TOKEN(u.fingerprint.fingerprint_str);
 
@@ -644,6 +657,47 @@ static int parse_attribute_setup(struct sdp_attribute *output) {
 	return 0;
 }
 
+static int parse_attribute_rtpmap(struct sdp_attribute *output) {
+	PARSE_DECL;
+	char *ep;
+	struct attribute_rtpmap *a;
+
+	output->attr = ATTR_RTPMAP;
+
+	PARSE_INIT;
+	EXTRACT_TOKEN(u.rtpmap.payload_type_str);
+	EXTRACT_TOKEN(u.rtpmap.encoding_str);
+
+	a = &output->u.rtpmap;
+
+	a->payload_type = strtoul(a->payload_type_str.s, &ep, 10);
+	if (ep == a->payload_type_str.s)
+		return -1;
+
+	str_chr_str(&a->clock_rate_str, &a->encoding_str, '/');
+	if (!a->clock_rate_str.s)
+		return -1;
+
+	a->encoding = a->encoding_str;
+	a->encoding.len -= a->clock_rate_str.len;
+	str_shift(&a->clock_rate_str, 1);
+
+	str_chr_str(&a->encoding_parameters, &a->clock_rate_str, '/');
+	if (a->encoding_parameters.s) {
+		a->clock_rate_str.len -= a->encoding_parameters.len;
+		str_shift(&a->encoding_parameters, 1);
+	}
+
+	if (!a->clock_rate_str.len)
+		return -1;
+
+	a->clock_rate = strtoul(a->clock_rate_str.s, &ep, 10);
+	if (ep && ep != a->clock_rate_str.s + a->clock_rate_str.len)
+		return -1;
+
+	return 0;
+}
+
 static int parse_attribute(struct sdp_attribute *a) {
 	int ret;
 
@@ -693,6 +747,8 @@ static int parse_attribute(struct sdp_attribute *a) {
 				ret = parse_attribute_crypto(a);
 			else if (!str_cmp(&a->name, "extmap"))
 				a->attr = ATTR_EXTMAP;
+			else if (!str_cmp(&a->name, "rtpmap"))
+				ret = parse_attribute_rtpmap(a);
 			break;
 		case 7:
 			if (!str_cmp(&a->name, "ice-pwd"))
