@@ -819,6 +819,12 @@ loop_ok:
 			mutex_unlock(&stream->out_lock);
 
 			if (tmp && PS_ISSET(stream, STRICT_SOURCE)) {
+				char ep_buff[64], sep_buff[64];;
+				smart_ntop_p(ep_buff, &endpoint.ip46, sizeof(ep_buff));
+				smart_ntop_p(sep_buff, &stream->endpoint.ip46, sizeof(sep_buff));
+				syslog(LOG_ERR, "Drop due to strict-source attribute; got endpoint: %s:%d, expected stream_endpoint: %s:%d",
+					ep_buff, endpoint.port, sep_buff, stream->endpoint.port);
+
 				atomic64_inc(&stream->stats.errors);
 				goto drop;
 			}
@@ -953,6 +959,9 @@ static void stream_fd_readable(int fd, void *p, uintptr_t u) {
 	char buf[RTP_BUFFER_SIZE];
 	int ret, iters;
 	struct sockaddr_in6 sin6_src;
+	struct sockaddr_in sin_src;
+	struct sockaddr sin;
+	socklen_t sin_len;
 	int update = 0;
 	struct call *ca;
 	str s;
@@ -979,8 +988,22 @@ static void stream_fd_readable(int fd, void *p, uintptr_t u) {
 #endif
 
 		ZERO(mh);
-		mh.msg_name = &sin6_src;
-		mh.msg_namelen = sizeof(sin6_src);
+		if (getsockname(fd, &sin, &sin_len) < 0) {
+			ilog(LOG_ERROR, "getsockname failed with errno=%d", errno);
+			break;
+		}
+
+		if (sin.sa_family == AF_INET) {
+			ilog(LOG_INFO, "received media on IPv4 socket");
+			mh.msg_name = &sin_src;
+			mh.msg_namelen = sizeof(sin_src);
+		} else if (sin.sa_family == AF_INET6) {
+			ilog(LOG_INFO, "received media on IPv4 socket");
+			mh.msg_name = &sin6_src;
+			mh.msg_namelen = sizeof(sin6_src);
+		} else {
+			break;
+		}
 		mh.msg_iov = &iov;
 		mh.msg_iovlen = 1;
 		mh.msg_control = control;
@@ -1019,6 +1042,17 @@ static void stream_fd_readable(int fd, void *p, uintptr_t u) {
 		goto done;
 
 got_dst:
+		if (sin.sa_family == AF_INET) {
+			ZERO(sin6_src);
+			sin6_src.sin6_family = AF_INET6;
+			sin6_src.sin6_port = sin_src.sin_port;
+			sin6_src.sin6_addr.s6_addr32[0] = 0;
+			sin6_src.sin6_addr.s6_addr32[1] = 0;
+			sin6_src.sin6_addr.s6_addr32[2] = htonl (0xffff);
+			memcpy(&sin6_src.sin6_addr.s6_addr32[3], &sin_src.sin_addr.s_addr, sizeof(sin_src.sin_addr));
+
+		}
+
 		str_init_len(&s, buf + RTP_BUFFER_HEAD_ROOM, ret);
 		ret = stream_packet(sfd, &s, &sin6_src, dst);
 		if (ret < 0) {
