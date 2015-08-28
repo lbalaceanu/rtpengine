@@ -19,11 +19,7 @@ struct log_limiter_entry {
 
 
 struct log_info __thread log_info;
-#ifndef __DEBUG
-volatile gint log_level = LOG_INFO;
-#else
 volatile gint log_level = LOG_DEBUG;
-#endif
 
 unsigned int max_log_line_length = 500;
 write_log_t write_log = (write_log_t) syslog;

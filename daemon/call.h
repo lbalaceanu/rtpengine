@@ -91,11 +91,7 @@ enum call_stream_state {
 #define RTP_LOOP_MAX_COUNT	30 /* number of consecutively detected dupes to trigger protection */
 #endif
 
-#ifdef __DEBUG
-#define __C_DBG(x...) ilog(LOG_DEBUG, x)
-#else
-#define __C_DBG(x...) ((void)0)
-#endif
+#define __C_DBG(x...) ilog(LOG_INFO, x)
 
 
 

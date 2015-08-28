@@ -381,6 +381,7 @@ void kernelize(struct packet_stream *stream) {
 	struct packet_stream *sink = NULL;
 	struct interface_address *ifa;
 	const char *nk_warn_msg;
+	char sep_buff[64];
 
 	if (PS_ISSET(stream, KERNELIZED))
 		return;
@@ -394,7 +395,8 @@ void kernelize(struct packet_stream *stream) {
 	if (!stream->sfd)
 		goto no_kernel;
 
-	ilog(LOG_INFO, "Kernelizing media stream");
+	smart_ntop_p(sep_buff, &stream->endpoint.ip46, sizeof(sep_buff));
+	ilog(LOG_INFO, "Kernelizing media stream: %s:%d", sep_buff, stream->endpoint.port);
 
 	sink = packet_stream_sink(stream);
 	if (!sink) {
@@ -626,6 +628,7 @@ static int stream_packet(struct stream_fd *sfd, str *s, struct sockaddr_in6 *fsi
 	struct interface_address *loc_addr;
 	struct rtp_header *rtp_h;
 	struct rtp_stats *rtp_s;
+	char ep_buff[64], sep_buff[64];
 
 	call = sfd->call;
 	cm = call->callmaster;
@@ -819,7 +822,6 @@ loop_ok:
 			mutex_unlock(&stream->out_lock);
 
 			if (tmp && PS_ISSET(stream, STRICT_SOURCE)) {
-				char ep_buff[64], sep_buff[64];;
 				smart_ntop_p(ep_buff, &endpoint.ip46, sizeof(ep_buff));
 				smart_ntop_p(sep_buff, &stream->endpoint.ip46, sizeof(sep_buff));
 				syslog(LOG_ERR, "Drop due to strict-source attribute; got endpoint: %s:%d, expected stream_endpoint: %s:%d",
@@ -872,8 +874,11 @@ update_addr:
 
 
 kernel_check:
-	if (PS_ISSET(stream, NO_KERNEL_SUPPORT))
+	if (PS_ISSET(stream, NO_KERNEL_SUPPORT)) {
+		smart_ntop_p(sep_buff, &stream->endpoint.ip46, sizeof(sep_buff));
+		ilog(LOG_WARNING, "No kernel support found for stream: %s:%d", sep_buff, stream->endpoint.port);
 		goto forward;
+	}
 
 	if (PS_ISSET(stream, CONFIRMED) && sink && PS_ARESET2(sink, CONFIRMED, FILLED))
 		kernelize(stream);
@@ -912,6 +917,9 @@ forward:
 	mh.msg_iovlen = 1;
 
 	ret = sendmsg(sink->sfd->fd.fd, &mh, 0);
+
+	smart_ntop_p(sep_buff, &sink->endpoint.ip46, sizeof(sep_buff));
+	ilog(LOG_INFO, "Send msg to sink endpoint: %s:%d", sep_buff, sink->endpoint.port);
 
 	if (ret == -1) {
 		ret = 0; /* temp for address family mismatches */
@@ -1593,6 +1601,7 @@ static int get_port4(struct udp_fd *r, u_int16_t p, const struct call_media *med
 	int fd;
 	struct sockaddr_in sin;
 	struct interface_address *ifa = (struct interface_address *)media->local_address;
+	char addr_buff[64];
 
 	fd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (fd < 0)
@@ -1610,11 +1619,27 @@ static int get_port4(struct udp_fd *r, u_int16_t p, const struct call_media *med
 	/* bind on media local_address if found */
 	if (ifa) {
 		memcpy(&sin.sin_addr.s_addr, &ifa->addr.s6_addr32[3], sizeof(sin.sin_addr));
-	} 
+		smart_ntop_p(addr_buff, &ifa->addr, sizeof(addr_buff));
+		ilog(LOG_INFO, "Found media IPv4 address: %s", addr_buff);
+	} else {
+		ilog(LOG_INFO, "Not found media IPv4 address, try to bind all interfaces, port %d", p);
+	}
 
 	/* bind on all IPs if media local_address not found */
-	if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)))
+	if (bind(fd, (struct sockaddr *) &sin, sizeof(sin))) {
+		if (ifa) {
+			ilog(LOG_ERR, "Failed to bind on IPv4 %s:%d", addr_buff, p);
+		} else {
+			ilog(LOG_ERR, "Failed to bind on all interfaces, port %d", p);
+		}
 		goto fail;
+	} else {
+		if (ifa) {
+			ilog(LOG_INFO, "Succeded bind on IPv4 %s:%d", addr_buff, p);
+		} else {
+			ilog(LOG_INFO, "Succeded bind on all interfaces, port %d", p);
+		}
+	}
 
 	r->fd = fd;
 
@@ -1629,6 +1654,7 @@ static int get_port6(struct udp_fd *r, u_int16_t p, const struct call_media *med
 	int fd;
 	struct sockaddr_in6 sin;
 	struct interface_address *ifa = (struct interface_address *)media->local_address;
+	char addr_buff[64];
 
 	fd = socket(AF_INET6, SOCK_DGRAM, 0);
 	if (fd < 0)
@@ -1647,10 +1673,26 @@ static int get_port6(struct udp_fd *r, u_int16_t p, const struct call_media *med
 	/* bind on media local_address if found */
 	if (ifa) {
 		memcpy(&sin.sin6_addr.s6_addr, &ifa->addr.s6_addr, sizeof(sin.sin6_addr));
+		smart_ntop_p(addr_buff, &ifa->addr, sizeof(addr_buff));
+		ilog(LOG_INFO, "Found media IPv6 address: %s", addr_buff);
+	} else {
+		ilog(LOG_INFO, "Not found media IPv6 address, try to bind all interfaces, port %d", p);
 	}
 
-	if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)))
+	if (bind(fd, (struct sockaddr *) &sin, sizeof(sin))) {
+		if (ifa) {
+			ilog(LOG_ERR, "Failed to bind on IPv6 %s:%d", addr_buff, p);
+		} else {
+			ilog(LOG_ERR, "Failed to bind on all interfaces, port %d", p);
+		}
 		goto fail;
+	} else {
+		if (ifa) {
+			ilog(LOG_INFO, "Succeded bind on IPv6 %s:%d", addr_buff, p);
+		} else {
+			ilog(LOG_INFO, "Succeded bind on all interfaces, port %d", p);
+		}
+	}
 
 	r->fd = fd;
 
@@ -1977,6 +2019,7 @@ static int __num_media_streams(struct call_media *media, unsigned int num_ports)
 
 static void __fill_stream(struct packet_stream *ps, const struct endpoint *epp, unsigned int port_off) {
 	struct endpoint ep;
+	char sep_buff[64];
 
 	ep = *epp;
 	ep.port += port_off;
@@ -1987,6 +2030,10 @@ static void __fill_stream(struct packet_stream *ps, const struct endpoint *epp, 
 
 	ps->endpoint = ep;
 	ps->advertised_endpoint = ep;
+
+	smart_ntop_p(sep_buff, &ps->endpoint.ip46, sizeof(sep_buff));
+	__C_DBG("filling stream endpoint: %s:%d", sep_buff, ps->endpoint.port);
+
 	/* we reset crypto params whenever the endpoint changes */
 	crypto_reset(&ps->crypto);
 	dtls_shutdown(ps);
